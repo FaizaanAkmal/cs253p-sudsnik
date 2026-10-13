@@ -279,7 +279,7 @@ export function createBilling(deps: ServiceDeps, db: Db, outbox: Outbox): Billin
       return ok(rows.map(publicLedger));
     },
 
-    webhook(body, ctx) {
+    async webhook(body, ctx) {
       const row = charge(body.orderId);
       if (!row) return err(sudsnikError("NOT_FOUND", `no charge for order ${body.orderId}`));
       if (row.payment_ref !== body.paymentRef || row.currency !== body.currency) {
@@ -314,6 +314,7 @@ export function createBilling(deps: ServiceDeps, db: Db, outbox: Outbox): Billin
           emit("charge.failed", next.tenant_id, ctx.correlationId, { orderId: next.order_id, reason: "payment processor reported failure" });
         }
       });
+      await finish();
       return ok({ accepted: true, duplicate: false });
     },
 

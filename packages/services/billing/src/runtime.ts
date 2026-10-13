@@ -8,7 +8,7 @@ export interface Runtime {
 }
 
 export interface BillingRuntime extends BillingService, Runtime {
-  webhook(body: PaymentsWebhook, ctx: Ctx): Result<{ accepted: boolean; duplicate: boolean }>;
+  webhook(body: PaymentsWebhook, ctx: Ctx): Promise<Result<{ accepted: boolean; duplicate: boolean }>>;
 }
 
 const runtimes = new WeakMap<ServiceDeps, Runtime>();

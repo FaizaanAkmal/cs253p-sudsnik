@@ -140,6 +140,7 @@ describe("billing", () => {
     expect(duplicate.json()).toEqual({ accepted: true, duplicate: true });
     const ledger = await app.inject({ method: "GET", url: "/ledger?orderId=webhook-order", headers: tenant });
     expect((ledger.json() as Array<{ kind: string }>).map(({ kind }) => kind)).toEqual(["authorize", "capture"]);
+    expect(stack.deps.bus.ofTopic("charge.captured")).toHaveLength(1);
   });
 
   it("authorizes once per order regardless of request idempotency key", async () => {

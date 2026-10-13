@@ -52,7 +52,7 @@ export function registerRoutes(app: App, service: BillingRuntime): void {
     method: paymentsWebhook.method,
     url: path,
     schema: { body: paymentsWebhook.body, response: { 200: paymentsWebhook.response } },
-    handler: async (req, reply) => sendResult(reply, service.webhook(req.body, req.ctx)),
+    handler: async (req, reply) => sendResult(reply, await service.webhook(req.body, req.ctx)),
   });
 }
 
