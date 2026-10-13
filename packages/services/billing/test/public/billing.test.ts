@@ -91,8 +91,8 @@ describe("billing", () => {
     expect(stack.deps.bus.ofTopic("charge.captured")).toHaveLength(1);
     const ledger = await app.inject({ method: "GET", url: "/ledger?orderId=order-1", headers: tenant });
     expect((ledger.json() as Array<{ kind: string; amount: number }>).map(({ kind, amount }) => [kind, amount])).toEqual([
-      ["capture", 5_140],
       ["authorize", 5_260],
+      ["capture", 5_140],
     ]);
   });
 
@@ -118,9 +118,54 @@ describe("billing", () => {
     expect(stack.deps.bus.ofTopic("refund.issued")).toHaveLength(1);
     const ledger = await app.inject({ method: "GET", url: "/ledger?orderId=order-2", headers: tenant });
     expect((ledger.json() as Array<{ kind: string; amount: number }>).map(({ kind, amount }) => [kind, amount])).toEqual([
-      ["refund", -5_260],
       ["authorize", 5_260],
+      ["refund", -5_260],
     ]);
+  });
+
+  it("records a captured webhook once, even when the callback is delivered twice", async () => {
+    const stack = await boot();
+    app = stack.app;
+    await app.inject({
+      method: "POST", url: "/charges/authorize", headers: writeHeaders("authorize-webhook"),
+      payload: { orderId: "webhook-order", amount: 4_900 },
+    });
+    const webhook = {
+      id: "captured-webhook", paymentRef: "pay-webhook-order", orderId: "webhook-order",
+      event: "captured" as const, amount: 4_900, currency: "USD", atMs: 30,
+    };
+    const first = await app.inject({ method: "POST", url: "/callbacks/payments", headers: { "x-sudsnik-tenant": "system" }, payload: webhook });
+    const duplicate = await app.inject({ method: "POST", url: "/callbacks/payments", headers: { "x-sudsnik-tenant": "system" }, payload: webhook });
+    expect(first.json()).toEqual({ accepted: true, duplicate: false });
+    expect(duplicate.json()).toEqual({ accepted: true, duplicate: true });
+    const ledger = await app.inject({ method: "GET", url: "/ledger?orderId=webhook-order", headers: tenant });
+    expect((ledger.json() as Array<{ kind: string }>).map(({ kind }) => kind)).toEqual(["authorize", "capture"]);
+  });
+
+  it("authorizes once per order regardless of request idempotency key", async () => {
+    const stack = await boot();
+    app = stack.app;
+    let calls = 0;
+    stack.deps.clients.payments.authorize = async (request, ctx) => {
+      calls++;
+      stack.authorizeKeys.push(ctx.idempotencyKey ?? "");
+      return {
+        ok: true,
+        value: { paymentRef: `pay-${request.orderId}`, state: "authorized", amount: request.amount, currency: request.currency },
+      };
+    };
+    const first = await app.inject({
+      method: "POST", url: "/charges/authorize", headers: writeHeaders("key-one"),
+      payload: { orderId: "A1", amount: 4_900 },
+    });
+    const second = await app.inject({
+      method: "POST", url: "/charges/authorize", headers: writeHeaders("key-two"),
+      payload: { orderId: "A1", amount: 4_900 },
+    });
+    expect(first.statusCode).toBe(200);
+    expect(second.statusCode).toBe(200);
+    expect(calls).toBe(1);
+    expect(stack.authorizeKeys).toEqual(["A1"]);
   });
 
   it("passes the caller's idempotency key through and retries a transient authorization", async () => {
@@ -138,12 +183,12 @@ describe("billing", () => {
     };
     const first = await app.inject({
       method: "POST", url: "/charges/authorize", headers: writeHeaders("A5"),
-      payload: { orderId: "retry-order", amount: 5_260 },
+      payload: { orderId: "A5", amount: 5_260 },
     });
     expect(first.statusCode).toBe(504);
     const retry = await app.inject({
       method: "POST", url: "/charges/authorize", headers: writeHeaders("A5"),
-      payload: { orderId: "retry-order", amount: 5_260 },
+      payload: { orderId: "A5", amount: 5_260 },
     });
     expect(retry.statusCode).toBe(200);
     expect(stack.authorizeKeys).toEqual(["A5", "A5"]);

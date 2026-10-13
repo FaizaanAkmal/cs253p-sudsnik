@@ -145,6 +145,10 @@ export function createBilling(deps: ServiceDeps, db: Db, outbox: Outbox): Billin
     return ok(row);
   }
 
+  function paymentCtx(ctx: Ctx, orderId: string): Ctx {
+    return { ...ctx, idempotencyKey: orderId };
+  }
+
   async function captureCharge(row: ChargeRow, ctx: Ctx, publish = true, recordLedger = true): Promise<Result<Charge>> {
     if (row.state === "captured" || row.state === "refunded") return ok(publicCharge(row));
     if (row.state !== "authorized" || !row.payment_ref) return err(sudsnikError("CONFLICT", `charge ${row.order_id} is ${row.state}`));
@@ -157,7 +161,7 @@ export function createBilling(deps: ServiceDeps, db: Db, outbox: Outbox): Billin
       WASH_PRICE_MINOR[expected.value.breakdown.tier as "standard" | "priority"] + units * CYCLE_UNIT_PRICE_MINOR,
       row.currency as (typeof CURRENCIES)[number],
     ));
-    const result = await deps.clients.payments.capture(row.payment_ref, actual, ctx);
+    const result = await deps.clients.payments.capture(row.payment_ref, actual, paymentCtx(ctx, row.order_id));
     if (!result.ok) return result;
     const next: ChargeRow = { ...row, amount: result.value.amount, state: "captured", updated_at: deps.clock.now(), failure: null };
     db.transaction(() => {
@@ -197,7 +201,7 @@ export function createBilling(deps: ServiceDeps, db: Db, outbox: Outbox): Billin
         amount,
         currency: priced.value.currency,
         callbackUrl,
-      }, ctx);
+      }, paymentCtx(ctx, orderId));
       const now = deps.clock.now();
       if (!result.ok) {
         if (result.error.retryable) return result;
@@ -253,7 +257,7 @@ export function createBilling(deps: ServiceDeps, db: Db, outbox: Outbox): Billin
       if (access.value.state !== "captured" || !access.value.payment_ref) {
         return err(sudsnikError("CONFLICT", `charge ${orderId} is ${access.value.state}`));
       }
-      const result = await deps.clients.payments.refund(access.value.payment_ref, access.value.amount, ctx);
+      const result = await deps.clients.payments.refund(access.value.payment_ref, access.value.amount, paymentCtx(ctx, orderId));
       if (!result.ok) return result;
       const next: ChargeRow = { ...access.value, amount: result.value.amount, state: "refunded", updated_at: deps.clock.now(), failure: null, refund_pending: 0 };
       db.transaction(() => {
@@ -270,8 +274,8 @@ export function createBilling(deps: ServiceDeps, db: Db, outbox: Outbox): Billin
 
     async ledger(filter: LedgerFilter, ctx) {
       const rows = filter.orderId
-        ? db.read<LedgerRow>("select * from ledger where tenant_id = ? and order_id = ? order by seq desc limit ?", ctx.tenantId, filter.orderId, filter.limit)
-        : db.read<LedgerRow>("select * from ledger where tenant_id = ? order by seq desc limit ?", ctx.tenantId, filter.limit);
+        ? db.read<LedgerRow>("select * from ledger where tenant_id = ? and order_id = ? order by seq limit ?", ctx.tenantId, filter.orderId, filter.limit)
+        : db.read<LedgerRow>("select * from ledger where tenant_id = ? order by seq limit ?", ctx.tenantId, filter.limit);
       return ok(rows.map(publicLedger));
     },
 
@@ -288,10 +292,10 @@ export function createBilling(deps: ServiceDeps, db: Db, outbox: Outbox): Billin
       const now = body.atMs;
       db.transaction(() => {
         db.write("insert into webhook_dedupe (webhook_id) values (?)", body.id);
-        if (body.event === "captured" && current.state === "authorized") {
+        if (body.event === "captured") {
           const next = { ...current, amount: Math.min(current.amount, body.amount), state: "captured" as const, updated_at: now };
-          putCharge(next);
-          if (!current.refund_pending && addLedger(next, "capture", next.amount, now, body.paymentRef)) {
+          if (current.state === "authorized") putCharge(next);
+          if (current.state === "authorized" && !current.refund_pending && addLedger(next, "capture", next.amount, now, body.paymentRef)) {
             emit("charge.captured", next.tenant_id, ctx.correlationId, {
               orderId: next.order_id, chargeId: next.charge_id, amount: next.amount, currency: next.currency,
             });
