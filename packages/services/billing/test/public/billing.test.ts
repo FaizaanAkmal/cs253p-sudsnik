@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { makeEnvelope } from "@sudsnik/contracts";
 import { fakeDeps } from "@sudsnik/contracts/testing";
+import { err, sudsnikError } from "@sudsnik/kernel";
 import type { createApp } from "../../src/index.js";
 import { handlersDir } from "../../src/index.js";
 import { createApp as createGolden } from "../../src/variants/golden/index.js";
@@ -12,6 +13,7 @@ async function boot() {
   const deps = fakeDeps("00000000c0ffee00", "billing", { handlersDir });
   const captured: Array<{ paymentRef: string; amount: number | undefined }> = [];
   const refunded: Array<{ paymentRef: string; amount: number | undefined }> = [];
+  const authorizeKeys: string[] = [];
   deps.clients.payments.authorize = async (req) => ({
     ok: true,
     value: { paymentRef: `pay-${req.orderId}`, state: "authorized", amount: req.amount, currency: req.currency },
@@ -25,7 +27,7 @@ async function boot() {
     return { ok: true, value: { paymentRef, state: "refunded", amount: amount ?? 0, currency: "USD" } };
   };
   const app = await createGolden(deps) as App;
-  return { app, deps, captured, refunded };
+  return { app, deps, captured, refunded, authorizeKeys };
 }
 
 async function stop(app: App) {
@@ -60,6 +62,15 @@ describe("billing", () => {
       currency: "EUR",
       breakdown: { base: 7_268, cycleUnits: 120, tier: "priority" },
     });
+  });
+
+  it("registers contract-schema routes on both API versions", async () => {
+    const stack = await boot();
+    app = stack.app;
+    expect((await app.inject({ method: "GET", url: "/v2/quotes/contract-order", headers: tenant })).statusCode).toBe(200);
+    expect((await app.inject({
+      method: "POST", url: "/v2/charges/authorize", headers: writeHeaders("bad-v2"), payload: { invalid: true },
+    })).statusCode).toBe(400);
   });
 
   it("captures actual cycle units on return, capped at the authorization", async () => {
@@ -100,11 +111,42 @@ describe("billing", () => {
       id: "webhook-2", paymentRef: "pay-order-2", orderId: "order-2",
       event: "refunded" as const, amount: 5_260, currency: "USD", atMs: 30,
     };
-    const first = await app.inject({ method: "POST", url: "/callbacks/payments", headers: tenant, payload: webhook });
-    const duplicate = await app.inject({ method: "POST", url: "/callbacks/payments", headers: tenant, payload: webhook });
+    const first = await app.inject({ method: "POST", url: "/callbacks/payments", headers: { "x-sudsnik-tenant": "system" }, payload: webhook });
+    const duplicate = await app.inject({ method: "POST", url: "/callbacks/payments", headers: { "x-sudsnik-tenant": "system" }, payload: webhook });
     expect(first.json()).toEqual({ accepted: true, duplicate: false });
     expect(duplicate.json()).toEqual({ accepted: true, duplicate: true });
     expect(stack.deps.bus.ofTopic("refund.issued")).toHaveLength(1);
+    const ledger = await app.inject({ method: "GET", url: "/ledger?orderId=order-2", headers: tenant });
+    expect((ledger.json() as Array<{ kind: string; amount: number }>).map(({ kind, amount }) => [kind, amount])).toEqual([
+      ["refund", -5_260],
+      ["authorize", 5_260],
+    ]);
+  });
+
+  it("passes the caller's idempotency key through and retries a transient authorization", async () => {
+    const stack = await boot();
+    app = stack.app;
+    let attempts = 0;
+    stack.deps.clients.payments.authorize = async (request, ctx) => {
+      stack.authorizeKeys.push(ctx.idempotencyKey ?? "");
+      attempts++;
+      if (attempts === 1) return err(sudsnikError("TIMEOUT", "transient payment timeout"));
+      return {
+        ok: true,
+        value: { paymentRef: `pay-${request.orderId}`, state: "authorized", amount: request.amount, currency: request.currency },
+      };
+    };
+    const first = await app.inject({
+      method: "POST", url: "/charges/authorize", headers: writeHeaders("A5"),
+      payload: { orderId: "retry-order", amount: 5_260 },
+    });
+    expect(first.statusCode).toBe(504);
+    const retry = await app.inject({
+      method: "POST", url: "/charges/authorize", headers: writeHeaders("A5"),
+      payload: { orderId: "retry-order", amount: 5_260 },
+    });
+    expect(retry.statusCode).toBe(200);
+    expect(stack.authorizeKeys).toEqual(["A5", "A5"]);
   });
 
   it("keeps the hollow variant healthy while returning 501 for contract routes", async () => {

@@ -24,12 +24,9 @@ export async function createApp(deps: ServiceDeps) {
       ...("query" in route && route.query ? { querystring: route.query } : {}),
       ...("idempotent" in route && route.idempotent ? { headers: IdempotencyHeaders } : {}),
     };
-    app.route({
-      method: route.method,
-      url: route.path,
-      schema,
-      handler: async (_req, reply) => reply.code(501).send(body),
-    });
+    for (const path of [route.path, `/v2${route.path}`]) {
+      app.route({ method: route.method, url: path, schema, handler: async (_req, reply) => reply.code(501).send(body) });
+    }
   }
   const handlers = await registerHandlers(deps, handlersDir);
   for (const handler of handlers) app.sudsnik.registerStop(handler.stop);

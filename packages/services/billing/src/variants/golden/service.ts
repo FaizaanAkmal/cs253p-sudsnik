@@ -145,11 +145,7 @@ export function createBilling(deps: ServiceDeps, db: Db, outbox: Outbox): Billin
     return ok(row);
   }
 
-  function paymentCtx(ctx: Ctx, kind: "authorize" | "capture" | "refund", orderId: string): Ctx {
-    return { ...ctx, idempotencyKey: `billing-${kind}-${orderId}` };
-  }
-
-  async function captureCharge(row: ChargeRow, ctx: Ctx, publish = true): Promise<Result<Charge>> {
+  async function captureCharge(row: ChargeRow, ctx: Ctx, publish = true, recordLedger = true): Promise<Result<Charge>> {
     if (row.state === "captured" || row.state === "refunded") return ok(publicCharge(row));
     if (row.state !== "authorized" || !row.payment_ref) return err(sudsnikError("CONFLICT", `charge ${row.order_id} is ${row.state}`));
     const cycle = db.readOne<{ units: number }>("select units from cycle_units where order_id = ?", row.order_id);
@@ -161,12 +157,12 @@ export function createBilling(deps: ServiceDeps, db: Db, outbox: Outbox): Billin
       WASH_PRICE_MINOR[expected.value.breakdown.tier as "standard" | "priority"] + units * CYCLE_UNIT_PRICE_MINOR,
       row.currency as (typeof CURRENCIES)[number],
     ));
-    const result = await deps.clients.payments.capture(row.payment_ref, actual, paymentCtx(ctx, "capture", row.order_id));
+    const result = await deps.clients.payments.capture(row.payment_ref, actual, ctx);
     if (!result.ok) return result;
     const next: ChargeRow = { ...row, amount: result.value.amount, state: "captured", updated_at: deps.clock.now(), failure: null };
     db.transaction(() => {
       putCharge(next);
-      if (addLedger(next, "capture", next.amount, next.updated_at, next.payment_ref ?? undefined) && publish) {
+      if (recordLedger && addLedger(next, "capture", next.amount, next.updated_at, next.payment_ref ?? undefined) && publish) {
         emit("charge.captured", next.tenant_id, ctx.correlationId, {
           orderId: next.order_id, chargeId: next.charge_id, amount: next.amount, currency: next.currency,
         });
@@ -201,7 +197,7 @@ export function createBilling(deps: ServiceDeps, db: Db, outbox: Outbox): Billin
         amount,
         currency: priced.value.currency,
         callbackUrl,
-      }, paymentCtx(ctx, "authorize", orderId));
+      }, ctx);
       const now = deps.clock.now();
       if (!result.ok) {
         if (result.error.retryable) return result;
@@ -249,7 +245,7 @@ export function createBilling(deps: ServiceDeps, db: Db, outbox: Outbox): Billin
       if (access.value.state === "authorized") {
         const refundIntent = { ...access.value, refund_pending: 1 };
         db.write("update charges set refund_pending = 1 where order_id = ?", orderId);
-        const captured = await captureCharge(refundIntent, ctx, false);
+        const captured = await captureCharge(refundIntent, ctx, false, false);
         if (!captured.ok) return captured;
         access = owned(charge(orderId), ctx.tenantId, orderId);
         if (!access.ok) return access;
@@ -257,7 +253,7 @@ export function createBilling(deps: ServiceDeps, db: Db, outbox: Outbox): Billin
       if (access.value.state !== "captured" || !access.value.payment_ref) {
         return err(sudsnikError("CONFLICT", `charge ${orderId} is ${access.value.state}`));
       }
-      const result = await deps.clients.payments.refund(access.value.payment_ref, access.value.amount, paymentCtx(ctx, "refund", orderId));
+      const result = await deps.clients.payments.refund(access.value.payment_ref, access.value.amount, ctx);
       if (!result.ok) return result;
       const next: ChargeRow = { ...access.value, amount: result.value.amount, state: "refunded", updated_at: deps.clock.now(), failure: null, refund_pending: 0 };
       db.transaction(() => {
@@ -281,22 +277,21 @@ export function createBilling(deps: ServiceDeps, db: Db, outbox: Outbox): Billin
 
     webhook(body, ctx) {
       const row = charge(body.orderId);
-      const access = owned(row, ctx.tenantId, body.orderId);
-      if (!access.ok) return access;
-      if (access.value.payment_ref !== body.paymentRef || access.value.currency !== body.currency) {
+      if (!row) return err(sudsnikError("NOT_FOUND", `no charge for order ${body.orderId}`));
+      if (row.payment_ref !== body.paymentRef || row.currency !== body.currency) {
         return err(sudsnikError("INVALID", "payment webhook does not match the charge"));
       }
       const duplicate = db.readOne<{ webhook_id: string }>("select webhook_id from webhook_dedupe where webhook_id = ?", body.id);
       if (duplicate) return ok({ accepted: true, duplicate: true });
 
-      const current = access.value;
+      const current = row;
       const now = body.atMs;
       db.transaction(() => {
         db.write("insert into webhook_dedupe (webhook_id) values (?)", body.id);
         if (body.event === "captured" && current.state === "authorized") {
           const next = { ...current, amount: Math.min(current.amount, body.amount), state: "captured" as const, updated_at: now };
           putCharge(next);
-          if (addLedger(next, "capture", next.amount, now, body.paymentRef) && !current.refund_pending) {
+          if (!current.refund_pending && addLedger(next, "capture", next.amount, now, body.paymentRef)) {
             emit("charge.captured", next.tenant_id, ctx.correlationId, {
               orderId: next.order_id, chargeId: next.charge_id, amount: next.amount, currency: next.currency,
             });
