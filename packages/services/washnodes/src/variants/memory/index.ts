@@ -2,16 +2,16 @@ import type { ServiceDeps } from "@sudsnik/contracts";
 import { bootService } from "@sudsnik/infra-boot";
 import { sqliteCycleRepo } from "../../adapters/db/cycleRepo.js";
 import { sqliteWasherRepo } from "../../adapters/db/washerRepo.js";
-import { memoryHoldStore } from "../../adapters/holdStore/memory.js";
+import { sqliteHoldStore } from "../../adapters/holdStore/sqlite.js";
 import { RECONCILE, composeApp, sharedHandlersDir, type AppOptions, type Profile, type WashnodesApp } from "../../app/compose.js";
 import { readEnv } from "../../env.js";
 
 export const variant = "memory";
 export const handlersDir = sharedHandlersDir;
-/** The starter's storage: the indexed inventory, but holds in a Map that a restart forgets. */
+/** Indexed SQLite inventory and durable, versioned holds. */
 export const profile: Profile = {
   washers: (db) => sqliteWasherRepo(db),
-  holds: (_db, washers) => memoryHoldStore(washers),
+  holds: (db) => sqliteHoldStore(db),
   cycles: sqliteCycleRepo,
   reconcile: RECONCILE,
 };

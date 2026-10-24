@@ -6,7 +6,7 @@ v1 polling or v2 callback, retry of faulted cycles on another washer, and mainte
 `docs/system-spec.md` §9.5.
 
 Layout is hexagonal: `src/domain/` (rules, no imports from infra), `src/ports/` (what the use cases need), `src/adapters/`
-(firmware `v1.ts` and `v2.ts`, Drizzle `db/schema.ts` and the repositories over it, `holdStore/memory.ts`, the outbox
+(firmware `v1.ts` and `v2.ts`, Drizzle `db/schema.ts` and the repositories over it, `holdStore/sqlite.ts`, the outbox
 publisher), `src/app/` (use cases, cycle flow, reports, the composition root `compose.ts`), `src/http/routes.ts`,
 `src/handlers/` (one per consumed topic), `src/runtime.ts` (how a directory-scanned handler reaches the app), and
 `src/variants/memory/`, which is the storage `compose.ts` is handed. `src/index.ts` selects it.
@@ -14,11 +14,12 @@ publisher), `src/app/` (use cases, cycle flow, reports, the composition root `co
 Routes: `POST /holds`, `POST /holds/:holdId/release`, `POST /holds/:holdId/start`, `GET /nodes/:nodeId`, and
 `POST /callbacks/washer`, which is where firmware v2 reports a cycle.
 
-The hold store is a `Map` keyed by hold id (`src/adapters/holdStore/memory.ts`): acquiring marks the washer held,
-release and consume check the version they were handed, and the minute sweep expires every hold past its `expiresAt`.
-Inventory, cycles, nodes, reports and the dedupe keys are indexed SQLite reads through `src/adapters/db/`.
+The hold store persists holds in SQLite (`src/adapters/holdStore/sqlite.ts`): acquisitions reserve washers before
+calling firmware, startup clears orphaned reservations, state transitions compare versions, and expiry writes its
+event to the outbox in the same transaction. Inventory, cycles, nodes, reports and the dedupe keys are indexed
+SQLite reads through `src/adapters/db/`.
 
-## Tables (`washnodes.sqlite`, `migrations/0001_inventory.sql`)
+## Tables (`washnodes.sqlite`, `migrations/`)
 
 The migration carries the schema only. `createApp` seeds nodes and washers from canon (`NODES`, `WASHERS_PER_NODE`,
 `NODE_FIRMWARE`, `washerId`) through `src/adapters/db/fleet.ts` before reporting ready: it inserts what is missing and
@@ -28,7 +29,7 @@ leaves existing rows alone, so the fleet follows a canon change with no migratio
 |---|---|
 | `washers` | One row per washer canon names: node, index in node, firmware, `state` (idle, held, washing, faulted), `maintenance`, current `hold_id` |
 | `nodes` | `in_contact` from the last poll or callback outcome |
-| `holds` | The hold schema, `version` for optimistic concurrency and `firmware_ref` (v1 token or v2 hold id) included; the hold store keeps its holds in the process and writes no row |
+| `holds` | Durable hold rows, `version` for optimistic concurrency, and `firmware_ref` (v1 token or v2 hold id) |
 | `cycles` | One row per firmware cycle: order, washer, `attempt`, outcome, `retry_pending` |
 | `washer_reports` | Anomaly reports and their triage action against the washer that washed the order |
 | `handled_events`, `washer_callbacks` | Dedupe keys: envelope ids and washer callback ids |

@@ -1,6 +1,6 @@
 import { HOLD_TTL_MS, type Ctx, type Logger } from "@sudsnik/contracts";
 import type { Hold, HoldStore, NodeStatus, WashnodesService } from "@sudsnik/contracts/services/washnodes";
-import { err, ok, sudsnikError, type Clock, type Result } from "@sudsnik/kernel";
+import { err, newId, ok, sudsnikError, type Clock, type Result } from "@sudsnik/kernel";
 import { firmwareRefOf, isPastExpiry } from "../domain/hold.js";
 import { isNodeId, washerView } from "../domain/washer.js";
 import type { CycleRepo } from "../ports/cycleRepo.js";
@@ -42,16 +42,22 @@ export function createService(d: ServiceDeps): WashnodesUseCases {
 
   async function acquireHold(nodeId: string, orderId: string, ctx: Ctx): Promise<Result<Hold>> {
     if (!isNodeId(nodeId)) return err(sudsnikError("NOT_FOUND", `no node ${nodeId}`));
-    const washer = d.washers.pickIdle(nodeId);
+    const holdId = newId();
+    let washer = d.washers.pickIdle(nodeId);
+    while (washer && !d.washers.reserve(washer.washerId, holdId)) washer = d.washers.pickIdle(nodeId);
     if (!washer) return err(sudsnikError("QUOTA", `no idle washer at node ${nodeId}`));
     const adapter = d.firmware[washer.firmware];
     const fw = await adapter.hold(washer.washerId, ctx);
-    if (!fw.ok) return fw;
+    if (!fw.ok) {
+      d.washers.free(washer.washerId, holdId);
+      return fw;
+    }
     const nowMs = now();
     const ttlMs = Math.max(0, Math.min(HOLD_TTL_MS, fw.value.expiresAt - nowMs));
-    const stored = await d.holds.acquire({ nodeId, washerId: washer.washerId, orderId, tenantId: ctx.tenantId, nowMs, ttlMs, firmwareRef: fw.value.ref });
+    const stored = await d.holds.acquire({ holdId, nodeId, washerId: washer.washerId, orderId, tenantId: ctx.tenantId, nowMs, ttlMs, firmwareRef: fw.value.ref });
     if (!stored.ok) {
       await adapter.release(washer.washerId, fw.value.ref, ctx);
+      d.washers.free(washer.washerId, holdId);
       return stored;
     }
     const hold = stored.value;
@@ -93,7 +99,7 @@ export function createService(d: ServiceDeps): WashnodesUseCases {
     // The firmware is running a cycle from here on, whatever happened to the hold while the call was in flight.
     // A hold the expiry sweep took in that window has already freed the washer, so the cycle is recorded and the
     // washer marked busy anyway: leaving it idle would let a second order hold a washer that is physically washing.
-    const consumed = await d.holds.consume(holdId, hold.version, now());
+    const consumed = await d.holds.consume(holdId, hold.version, started.value.startedAt);
     if (!consumed.ok) {
       d.washers.startWashing(washer.washerId);
       d.logger.error("cycle_started_without_hold", { holdId, cycleId: started.value.cycleId, washerId: washer.washerId, error: consumed.error.message });

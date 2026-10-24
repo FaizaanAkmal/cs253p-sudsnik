@@ -113,10 +113,10 @@ export function createCycleFlow(d: CycleDeps): CycleFlow {
     },
     async sweep() {
       const nowMs = now();
-      const expired = await d.holds.expire(nowMs);
-      if (expired.ok) {
-        for (const h of expired.value) d.publish.emit("hold.expired", { tenantId: h.tenantId }, { holdId: h.holdId, washerId: h.washerId, orderId: h.orderId });
-      }
+      const expired = await d.holds.expire(nowMs, (holds) => {
+        for (const h of holds) d.publish.emit("hold.expired", { tenantId: h.tenantId }, { holdId: h.holdId, washerId: h.washerId, orderId: h.orderId });
+      });
+      if (!expired.ok) d.logger.error("hold_expiry_failed", { error: expired.error.message });
       d.washers.restoreFaulted(nowMs - FAULT_COOLDOWN_MS);
       for (const c of d.cycles.pendingRetries()) await retry(c);
     },

@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { HOLD_TTL_MS, WASHERS_PER_NODE } from "@sudsnik/contracts";
-import { harness, type Variant } from "../helpers.js";
+import { harness, SEED, type Variant } from "../helpers.js";
 
 
 /** The behaviour every variant of this seam owes, run once per variant a tree has. */
@@ -82,6 +85,55 @@ export function holdsSuite(variants: Variant[]): void {
       expect(second.headers["idempotent-replayed"]).toBe("true");
       expect(await h.events("hold.acquired")).toHaveLength(1);
       await h.close();
+    });
+
+    it("reserves a washer before concurrent firmware calls can claim it twice", async () => {
+      const h = await harness(variant);
+      const [first, second] = await Promise.all([h.acquire("B", "o1"), h.acquire("B", "o2")]);
+      expect([first.status, second.status]).toEqual([201, 201]);
+      expect(new Set([first.body.washerId, second.body.washerId]).size).toBe(2);
+      expect((await h.status("B")).body.washers.filter((w) => w.state === "held")).toHaveLength(2);
+      await h.close();
+    });
+
+    it("retains a live hold across an application restart", async () => {
+      const dataDir = mkdtempSync(join(tmpdir(), "washnodes-holds-"));
+      let first: Awaited<ReturnType<typeof harness>> | undefined;
+      let restarted: Awaited<ReturnType<typeof harness>> | undefined;
+      try {
+        first = await harness(variant, SEED, dataDir);
+        const hold = (await first.acquire("B", "restart-order")).body;
+        await first.close();
+        first = undefined;
+        restarted = await harness(variant, SEED, dataDir);
+        expect((await restarted.release(hold.holdId)).body).toMatchObject({ holdId: hold.holdId, state: "released", version: 1 });
+        expect((await restarted.status("B")).body.washers.find((w) => w.washerId === hold.washerId)?.state).toBe("idle");
+      } finally {
+        if (restarted) await restarted.close();
+        else if (first) await first.close();
+        rmSync(dataDir, { recursive: true, force: true });
+      }
+    });
+
+    it("expires a persisted hold and emits its event after restart", async () => {
+      const dataDir = mkdtempSync(join(tmpdir(), "washnodes-expiry-"));
+      let first: Awaited<ReturnType<typeof harness>> | undefined;
+      let restarted: Awaited<ReturnType<typeof harness>> | undefined;
+      try {
+        first = await harness(variant, SEED, dataDir);
+        const hold = (await first.acquire("B", "expiry-order")).body;
+        await first.close();
+        first = undefined;
+        restarted = await harness(variant, SEED, dataDir);
+        await restarted.advance(hold.expiresAt - restarted.deps.clock.now());
+        expect((await restarted.events("hold.expired")).map((event) => event.payload)).toEqual([
+          { holdId: hold.holdId, washerId: hold.washerId, orderId: hold.orderId },
+        ]);
+      } finally {
+        if (restarted) await restarted.close();
+        else if (first) await first.close();
+        rmSync(dataDir, { recursive: true, force: true });
+      }
     });
   });
 }
