@@ -42,22 +42,22 @@ export function createService(d: ServiceDeps): WashnodesUseCases {
 
   async function acquireHold(nodeId: string, orderId: string, ctx: Ctx): Promise<Result<Hold>> {
     if (!isNodeId(nodeId)) return err(sudsnikError("NOT_FOUND", `no node ${nodeId}`));
-    const holdId = newId();
+    const reservationId = newId();
     let washer = d.washers.pickIdle(nodeId);
-    while (washer && !d.washers.reserve(washer.washerId, holdId)) washer = d.washers.pickIdle(nodeId);
+    while (washer && !d.washers.reserve(washer.washerId, reservationId)) washer = d.washers.pickIdle(nodeId);
     if (!washer) return err(sudsnikError("QUOTA", `no idle washer at node ${nodeId}`));
     const adapter = d.firmware[washer.firmware];
     const fw = await adapter.hold(washer.washerId, ctx);
     if (!fw.ok) {
-      d.washers.free(washer.washerId, holdId);
+      d.washers.free(washer.washerId, reservationId);
       return fw;
     }
     const nowMs = now();
     const ttlMs = Math.max(0, Math.min(HOLD_TTL_MS, fw.value.expiresAt - nowMs));
-    const stored = await d.holds.acquire({ holdId, nodeId, washerId: washer.washerId, orderId, tenantId: ctx.tenantId, nowMs, ttlMs, firmwareRef: fw.value.ref });
+    const stored = await d.holds.acquire({ nodeId, washerId: washer.washerId, orderId, tenantId: ctx.tenantId, nowMs, ttlMs, firmwareRef: fw.value.ref });
     if (!stored.ok) {
       await adapter.release(washer.washerId, fw.value.ref, ctx);
-      d.washers.free(washer.washerId, holdId);
+      d.washers.free(washer.washerId, reservationId);
       return stored;
     }
     const hold = stored.value;
@@ -99,7 +99,7 @@ export function createService(d: ServiceDeps): WashnodesUseCases {
     // The firmware is running a cycle from here on, whatever happened to the hold while the call was in flight.
     // A hold the expiry sweep took in that window has already freed the washer, so the cycle is recorded and the
     // washer marked busy anyway: leaving it idle would let a second order hold a washer that is physically washing.
-    const consumed = await d.holds.consume(holdId, hold.version, started.value.startedAt);
+    const consumed = await d.holds.consume(holdId, hold.version, now());
     if (!consumed.ok) {
       d.washers.startWashing(washer.washerId);
       d.logger.error("cycle_started_without_hold", { holdId, cycleId: started.value.cycleId, washerId: washer.washerId, error: consumed.error.message });

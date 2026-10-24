@@ -11,7 +11,7 @@ export function memoryHoldStore(washers: WasherRepo): HoldStore {
       const ref = firmwareRefOf(input.firmwareRef, `hold for order ${input.orderId}`);
       if (!ref.ok) return ref;
       const hold: StoredHold = {
-        holdId: input.holdId ?? newId(),
+        holdId: newId(),
         tenantId: input.tenantId,
         nodeId: input.nodeId,
         washerId: input.washerId,
@@ -42,7 +42,7 @@ export function memoryHoldStore(washers: WasherRepo): HoldStore {
       washers.startWashing(next.washerId);
       return ok(next);
     },
-    expire: async (nowMs, onExpired) => {
+    expire: async (nowMs) => {
       const expired: StoredHold[] = [];
       for (const hold of holds.values()) {
         if (hold.state !== "held" || hold.expiresAt > nowMs) continue;
@@ -51,7 +51,6 @@ export function memoryHoldStore(washers: WasherRepo): HoldStore {
         washers.free(hold.washerId, hold.holdId);
         expired.push(next);
       }
-      onExpired?.(expired);
       return ok(expired);
     },
     get: async (holdId) => {

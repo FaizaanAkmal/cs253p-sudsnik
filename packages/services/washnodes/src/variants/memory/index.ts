@@ -11,7 +11,7 @@ export const handlersDir = sharedHandlersDir;
 /** Indexed SQLite inventory and durable, versioned holds. */
 export const profile: Profile = {
   washers: (db) => sqliteWasherRepo(db),
-  holds: (db) => sqliteHoldStore(db),
+  holds: (db, _washers, onExpired) => sqliteHoldStore(db, onExpired),
   cycles: sqliteCycleRepo,
   reconcile: RECONCILE,
 };

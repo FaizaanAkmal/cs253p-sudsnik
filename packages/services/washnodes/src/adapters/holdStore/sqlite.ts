@@ -1,7 +1,7 @@
 import { and, eq, gt, lte } from "drizzle-orm";
 import type { Db } from "@sudsnik/infra-db";
 import { err, newId, ok, sudsnikError } from "@sudsnik/kernel";
-import type { HoldStore } from "@sudsnik/contracts/services/washnodes";
+import type { Hold, HoldStore } from "@sudsnik/contracts/services/washnodes";
 import { firmwareRefOf, guardTransition, type StoredHold } from "../../domain/hold.js";
 import { holds, washers } from "../db/schema.js";
 
@@ -9,7 +9,7 @@ type HoldRow = typeof holds.$inferSelect;
 const asHold = (row: HoldRow): StoredHold => ({ ...row });
 const expiredConflict = (holdId: string) => err(sudsnikError("CONFLICT", `hold ${holdId} has expired`));
 
-export function sqliteHoldStore(db: Db): HoldStore {
+export function sqliteHoldStore(db: Db, onExpired: (holds: Hold[]) => void): HoldStore {
   db.sqlite.transaction(() => {
     db.write(`update washers set state = 'idle', hold_id = null
       where state = 'held' and not exists (
@@ -28,17 +28,21 @@ export function sqliteHoldStore(db: Db): HoldStore {
       const ref = firmwareRefOf(input.firmwareRef, `hold for order ${input.orderId}`);
       if (!ref.ok) return ref;
       const hold: StoredHold = {
-        holdId: input.holdId ?? newId(), tenantId: input.tenantId, nodeId: input.nodeId, washerId: input.washerId,
+        holdId: newId(), tenantId: input.tenantId, nodeId: input.nodeId, washerId: input.washerId,
         orderId: input.orderId, state: "held", acquiredAt: input.nowMs, expiresAt: input.nowMs + input.ttlMs,
         version: 0, firmwareRef: ref.value,
       };
       return transact(() => {
-        const claimed = db.orm.update(washers).set({ state: "held", holdId: hold.holdId })
-          .where(and(eq(washers.washerId, input.washerId), eq(washers.state, "idle"), eq(washers.maintenance, false))).run().changes;
-        const reserved = claimed === 1 || db.orm.select({ washerId: washers.washerId }).from(washers).where(and(
-          eq(washers.washerId, input.washerId), eq(washers.state, "held"), eq(washers.holdId, hold.holdId),
-        )).get() !== undefined;
-        if (!reserved) return err(sudsnikError("CONFLICT", `washer ${input.washerId} is no longer reserved`));
+        const reservation = db.orm.select().from(washers).where(and(
+          eq(washers.washerId, input.washerId), eq(washers.state, "held"), eq(washers.maintenance, false),
+        )).get();
+        if (!reservation?.holdId) return err(sudsnikError("CONFLICT", `washer ${input.washerId} is no longer reserved`));
+        const live = db.orm.select({ holdId: holds.holdId }).from(holds).where(and(eq(holds.washerId, input.washerId), eq(holds.state, "held"))).get();
+        if (live) return err(sudsnikError("CONFLICT", `washer ${input.washerId} already has a live hold`));
+        const changed = db.orm.update(washers).set({ holdId: hold.holdId }).where(and(
+          eq(washers.washerId, input.washerId), eq(washers.holdId, reservation.holdId),
+        )).run().changes;
+        if (!changed) return err(sudsnikError("CONFLICT", `washer ${input.washerId} reservation changed`));
         db.orm.insert(holds).values({ ...hold, endedAt: null, reason: null }).run();
         return ok(hold);
       });
@@ -66,7 +70,7 @@ export function sqliteHoldStore(db: Db): HoldStore {
         .where(and(eq(washers.washerId, guarded.value.washerId), eq(washers.holdId, holdId))).run();
       return ok({ ...guarded.value, state: "consumed", version: version + 1 });
     }),
-    expire: async (nowMs, onExpired) => transact(() => {
+    expire: async (nowMs) => transact(() => {
       const due = db.orm.select().from(holds).where(and(eq(holds.state, "held"), lte(holds.expiresAt, nowMs))).all();
       const expired: StoredHold[] = [];
       for (const row of due) {
@@ -78,7 +82,7 @@ export function sqliteHoldStore(db: Db): HoldStore {
           .where(and(eq(washers.washerId, hold.washerId), eq(washers.holdId, hold.holdId))).run();
         expired.push({ ...hold, state: "expired", version: hold.version + 1 });
       }
-      onExpired?.(expired);
+      onExpired(expired);
       return ok(expired);
     }),
     get: async (holdId) => {

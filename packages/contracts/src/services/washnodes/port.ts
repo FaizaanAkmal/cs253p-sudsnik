@@ -11,10 +11,10 @@ export interface WashnodesService {
 
 /** Durable hold storage with optimistic concurrency. */
 export interface HoldStore {
-  acquire(input: { holdId?: string; nodeId: string; washerId: string; orderId: string; tenantId: string; nowMs: number; ttlMs: number; firmwareRef?: string }): Promise<Result<Hold>>;
+  acquire(input: { nodeId: string; washerId: string; orderId: string; tenantId: string; nowMs: number; ttlMs: number; firmwareRef?: string }): Promise<Result<Hold>>;
   release(holdId: string, expectedVersion: number, reason: string, nowMs: number): Promise<Result<Hold>>;
   /** Marks a held hold consumed when its cycle starts; CONFLICT when the version or state does not match. */
   consume(holdId: string, expectedVersion: number, nowMs: number): Promise<Result<Hold>>;
-  expire(nowMs: number, onExpired?: (holds: Hold[]) => void): Promise<Result<Hold[]>>;
+  expire(nowMs: number): Promise<Result<Hold[]>>;
   get(holdId: string): Promise<Result<Hold>>;
 }

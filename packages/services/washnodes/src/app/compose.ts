@@ -3,7 +3,7 @@ import { createHttpClient, DEFAULT_TIMEOUTS, type HttpClient } from "@sudsnik/cl
 import { createWashnodesRpc, type WashnodesRpc } from "@sudsnik/clients/legacy/washnodesRpc";
 import { MINUTE_MS, ORBIT_MS, mockUrlVar, serviceUrlVar, type CostResponse, type ServiceDeps } from "@sudsnik/contracts";
 import { openDb, type Db } from "@sudsnik/infra-db";
-import type { HoldStore } from "@sudsnik/contracts/services/washnodes";
+import type { Hold, HoldStore } from "@sudsnik/contracts/services/washnodes";
 import { createBaseApp, type App, type SudsnikApp } from "@sudsnik/infra-http";
 import type { MeterSink } from "@sudsnik/infra-metering";
 import { createOutbox, registerHandlers } from "@sudsnik/infra-queue";
@@ -40,7 +40,7 @@ export interface AppOptions {
 
 export interface Profile {
   washers(db: Db, deps: ServiceDeps): WasherRepo;
-  holds(db: Db, washers: WasherRepo): HoldStore;
+  holds(db: Db, washers: WasherRepo, onExpired: (holds: Hold[]) => void): HoldStore;
   cycles(db: Db): CycleRepo;
   /** How often the v2 reconciliation sweep runs, and how stale a running cycle must be for it to read it back. */
   reconcile: { everyMs: number; staleAfterMs: number };
@@ -74,11 +74,13 @@ export async function composeApp(deps: ServiceDeps, variant: string, profile: Pr
   const db = openDb({ path: serviceDataFile(deps), service: deps.service, meter: deps.meter, migrationsDir });
   seedFleet(db);
   const outbox = createOutbox(db, deps.bus);
+  const publish = outboxPublisher(outbox, deps.clock);
   const washers = profile.washers(db, deps);
-  const holds = profile.holds(db, washers);
+  const holds = profile.holds(db, washers, (expired) => {
+    for (const h of expired) publish.emit("hold.expired", { tenantId: h.tenantId }, { holdId: h.holdId, washerId: h.washerId, orderId: h.orderId });
+  });
   const cycles = profile.cycles(db);
   const nodes = sqliteNodeRepo(db);
-  const publish = outboxPublisher(outbox, deps.clock);
   const callbackUrl = `${(deps.env[serviceUrlVar("washnodes")] ?? "").replace(/\/$/, "")}/callbacks`;
   const firmware = { v1: v1Adapter(opts.v1Rpc ?? rpcFor(deps), deps.clients.washerV1), v2: v2Adapter(deps.clients.washerV2, callbackUrl) };
   const logger = deps.telemetry.logger;
