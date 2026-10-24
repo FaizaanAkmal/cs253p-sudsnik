@@ -89,10 +89,10 @@ export function holdsSuite(variants: Variant[]): void {
 
     it("reserves a washer before concurrent firmware calls can claim it twice", async () => {
       const h = await harness(variant);
+      for (let i = 0; i < WASHERS_PER_NODE - 1; i++) expect((await h.acquire("B", `occupied-${i}`)).status).toBe(201);
       const [first, second] = await Promise.all([h.acquire("B", "o1"), h.acquire("B", "o2")]);
-      expect([first.status, second.status]).toEqual([201, 201]);
-      expect(new Set([first.body.washerId, second.body.washerId]).size).toBe(2);
-      expect((await h.status("B")).body.washers.filter((w) => w.state === "held")).toHaveLength(2);
+      expect([first.status, second.status].sort()).toEqual([201, 409]);
+      expect((await h.status("B")).body.washers.filter((w) => w.state === "held")).toHaveLength(WASHERS_PER_NODE);
       await h.close();
     });
 

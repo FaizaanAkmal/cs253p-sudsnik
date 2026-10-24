@@ -44,8 +44,18 @@ export function createService(d: ServiceDeps): WashnodesUseCases {
     if (!isNodeId(nodeId)) return err(sudsnikError("NOT_FOUND", `no node ${nodeId}`));
     const reservationId = newId();
     let washer = d.washers.pickIdle(nodeId);
-    while (washer && !d.washers.reserve(washer.washerId, reservationId)) washer = d.washers.pickIdle(nodeId);
-    if (!washer) return err(sudsnikError("QUOTA", `no idle washer at node ${nodeId}`));
+    let contended = false;
+    while (washer && !d.washers.reserve(washer.washerId, reservationId)) {
+      contended = true;
+      washer = d.washers.pickIdle(nodeId);
+    }
+    if (!washer && !contended) {
+      for (const reserved of d.washers.listByNode(nodeId).filter((w) => w.state === "held" && w.holdId)) {
+        const hold = await d.holds.get(reserved.holdId!);
+        if (!hold.ok && hold.error.code === "NOT_FOUND") contended = true;
+      }
+    }
+    if (!washer) return err(sudsnikError(contended ? "CONFLICT" : "QUOTA", contended ? `washer reservation at node ${nodeId} was claimed concurrently` : `no idle washer at node ${nodeId}`));
     const adapter = d.firmware[washer.firmware];
     const fw = await adapter.hold(washer.washerId, ctx);
     if (!fw.ok) {
