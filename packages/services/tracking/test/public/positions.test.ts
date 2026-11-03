@@ -64,6 +64,10 @@ describe("positions", () => {
     const fresh = await app.inject({ url: "/positions/sh1", headers: tenant() });
     expect(fresh.json()).toEqual({ shuttleId: "sh1", orbitPhase: 0.75, observedAt: 9_000, source: "fresh" });
     expect(ephemeris.calls).toBe(before + 1);
+    const stored = await app.inject({ url: "/positions/cached/sh1", headers: tenant() });
+    expect(stored.json()).toEqual({ shuttleId: "sh1", orbitPhase: 0.5, observedAt: 1_000, source: "cached" });
+    const absent = await app.inject({ url: "/positions/cached/sh3", headers: tenant() });
+    expect(absent.statusCode).toBe(404);
   });
 
   it("returns 404 until a callback stores the position, then reuses that cached answer", async () => {

@@ -25,8 +25,6 @@ export const createApp = (deps: ServiceDeps) =>
     async function position(shuttleId: string, ctx: Parameters<typeof deps.clients.ephemeris.position>[1]): Promise<Result<Position>> {
       const result = await deps.clients.ephemeris.position(shuttleId, ctx);
       if (!result.ok) return result;
-      const stored = { shuttleId, orbitPhase: result.value.orbitPhase, observedAt: result.value.atMs };
-      remember(stored);
       return ok(fresh(result.value));
     }
 
