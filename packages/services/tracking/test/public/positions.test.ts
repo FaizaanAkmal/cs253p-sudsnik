@@ -40,6 +40,10 @@ describe("positions", () => {
     expect(res.statusCode).toBe(400);
     expect(res.json()).toMatchObject({ code: "INVALID" });
     expect(await app.outbox.pump()).toBe(0);
+    const before = ephemeris.calls;
+    const cached = await app.inject({ url: "/positions/cached/sh2", headers: tenant() });
+    expect(cached.statusCode).toBe(404);
+    expect(ephemeris.calls).toBe(before);
   });
 
   it("rejects a callback that is not a position", async () => {
@@ -62,13 +66,27 @@ describe("positions", () => {
     expect(ephemeris.calls).toBe(before + 1);
   });
 
-  it("warms the cache on a miss and reuses it on the next cached read", async () => {
-    const before = ephemeris.calls;
+  it("returns 404 until a callback stores the position, then reuses that cached answer", async () => {
+    const absent = await app.inject({ url: "/positions/cached/sh2", headers: tenant() });
+    expect(absent.statusCode).toBe(404);
+    const callback = await post(positionCallback("sh2", 0.25, 2_000));
+    expect(callback.statusCode).toBe(200);
     const first = await app.inject({ url: "/positions/cached/sh2", headers: tenant() });
     const second = await app.inject({ url: "/positions/cached/sh2", headers: tenant() });
-    expect(first.json()).toEqual({ shuttleId: "sh2", orbitPhase: 0.75, observedAt: 9_000, source: "cached" });
+    expect(first.json()).toEqual({ shuttleId: "sh2", orbitPhase: 0.25, observedAt: 2_000, source: "cached" });
     expect(second.json()).toEqual(first.json());
-    expect(ephemeris.calls).toBe(before + 1);
+  });
+
+  it("lists only positions persisted from relay callbacks", async () => {
+    await post(positionCallback("sh4", 0.4, 4_000));
+    const before = ephemeris.calls;
+    const response = await app.inject({ url: "/positions", headers: tenant() });
+    expect(response.json()).toEqual([
+      { shuttleId: "sh1", orbitPhase: 0.5, observedAt: 1_000, source: "cached" },
+      { shuttleId: "sh2", orbitPhase: 0.25, observedAt: 2_000, source: "cached" },
+      { shuttleId: "sh4", orbitPhase: 0.4, observedAt: 4_000, source: "cached" },
+    ]);
+    expect(ephemeris.calls).toBe(before);
   });
 
   it("passes an ephemeris error through", async () => {

@@ -1,7 +1,7 @@
 import { SHUTTLES, type ServiceDeps } from "@sudsnik/contracts";
 import type { Position } from "@sudsnik/contracts/services/tracking";
 import { createCache } from "@sudsnik/infra-cache";
-import { ok, type Result } from "@sudsnik/kernel";
+import { err, ok, sudsnikError, type Result } from "@sudsnik/kernel";
 import type { StoredPosition } from "../../store.js";
 import { buildApp, cached, fresh, ingest, podLocation } from "../../app.js";
 import type { Tracking } from "../../routes.js";
@@ -17,8 +17,6 @@ export const createApp = (deps: ServiceDeps) =>
       meter: deps.meter,
       service: deps.service,
     });
-    const pending = new Map<string, Promise<Result<Position>>>();
-
     function remember(position: StoredPosition): void {
       const current = cache.get(position.shuttleId);
       if (!current || position.observedAt >= current.observedAt) cache.set(position.shuttleId, position);
@@ -32,9 +30,7 @@ export const createApp = (deps: ServiceDeps) =>
       return ok(fresh(result.value));
     }
 
-    async function positionCached(shuttleId: string, ctx: Parameters<typeof deps.clients.ephemeris.position>[1]): Promise<Result<Position>> {
-      const active = pending.get(shuttleId);
-      if (active) return active;
+    async function positionCached(shuttleId: string): Promise<Result<Position>> {
       const hit = cache.get(shuttleId);
       if (hit) return Promise.resolve(ok(cached(hit)));
 
@@ -43,28 +39,17 @@ export const createApp = (deps: ServiceDeps) =>
         remember(stored);
         return Promise.resolve(ok(cached(stored)));
       }
-
-      const request = deps.clients.ephemeris.position(shuttleId, ctx).then((result) => {
-        if (!result.ok) return result;
-        const found = { shuttleId, orbitPhase: result.value.orbitPhase, observedAt: result.value.atMs };
-        remember(found);
-        return ok(cached(found));
-      }).finally(() => pending.delete(shuttleId));
-      pending.set(shuttleId, request);
-      return request;
+      return err(sudsnikError("NOT_FOUND", `no stored position for ${shuttleId}`));
     }
 
     return {
       position,
       positionCached,
-      async positions(ctx) {
-        const positions: Position[] = [];
-        for (const shuttleId of SHUTTLES) {
-          const result = await position(shuttleId, ctx);
-          if (!result.ok) return result;
-          positions.push(result.value);
-        }
-        return ok(positions);
+      async positions() {
+        return ok(parts.store.positions().map((stored) => {
+          remember(stored);
+          return cached(stored);
+        }));
       },
       podLocation: podLocation(parts),
       relay: (body, ctx) => ingest(parts, body, ctx, remember),
