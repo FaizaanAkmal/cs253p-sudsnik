@@ -11,13 +11,11 @@ outbox), `runtime.ts` (how directory-scanned handlers reach the app), `gate.ts` 
 sweep runs through it), `app.ts` (the shared app), `strategy.ts` (what `src/variants/` supplies, which `src/index.ts`
 selects).
 
-The strategy is where `ephemeris` is reached and how far a relay callback is taken at its word. Planning a pickup asks
-`ephemeris` for the link windows, then for the position of each of the six shuttles, and ranks the three nodes by asking
-`/status` for each; a return window asks `/status` again for the node it leaves from. That is ten calls for an order,
-asked again for the next one, and a refusal from `ephemeris` is that order's refusal until the queue comes round again.
-Ingest takes a relay callback as delivered: its checksum is not re-derived and its id is not recorded, and each callback
-applies the step of the journey its `kind` names, refusing only one that arrives more than a step ahead of where the
-order has got to.
+The selected `golden` strategy caches link windows for one orbit and node status for one minute, and coalesces
+concurrent misses. It does not fetch shuttle positions that scheduling does not use. A breaker logs `breaker_state`
+when `ephemeris` refuses a call; while it is open, windows come from the canon schedule, node choice rotates locally,
+and a return waits for contact rather than failing. The `naive` variant remains available for comparison. Both variants
+currently share the Week 6 callback trust implementation: the starter takes a relay callback at its word.
 
 A pod holds a washer only once it has arrived: `order.placed` schedules a window and a node, the `delivered` callback
 acquires the hold and publishes `pod.delivered`. A node with no idle washer is waited on, not polled: the pod is woken by

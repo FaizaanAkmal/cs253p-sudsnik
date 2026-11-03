@@ -32,4 +32,27 @@ export function liveWindows(client: EphemerisClient): WindowSource {
   };
 }
 
-/** The three windows `ephemeris` returns are kept per habitat for one orbit; a failed refresh falls back to canon. */
+/** The three windows `ephemeris` returns are kept per habitat for one orbit. Concurrent misses share one request. */
+export function cachedWindows(client: EphemerisClient, cache: Cache<Window[]>): WindowSource {
+  const pending = new Map<string, Promise<Result<Window[]>>>();
+  return {
+    async next(habitatId, nowMs, ctx) {
+      let windows = cache.get(habitatId);
+      if (windows === undefined) {
+        let request = pending.get(habitatId);
+        if (!request) {
+          request = client.windows(habitatId, ctx).then((r) => {
+            if (!r.ok) return r;
+            cache.set(habitatId, r.value.windows);
+            return ok(r.value.windows);
+          }).finally(() => pending.delete(habitatId));
+          pending.set(habitatId, request);
+        }
+        const result = await request;
+        if (!result.ok) return result;
+        windows = result.value;
+      }
+      return ok(firstWindowFrom(windows, nowMs) ?? canonWindow(habitatId, nowMs));
+    },
+  };
+}

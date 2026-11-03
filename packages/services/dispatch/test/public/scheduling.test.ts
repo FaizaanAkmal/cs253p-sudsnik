@@ -68,6 +68,25 @@ describe("pickup scheduling", () => {
     expect(shuttles).toEqual(["sh1", "sh2", "sh3", "sh4", "sh5", "sh6", "sh1"]);
   });
 
+  it("shares cached ephemeris answers across orders and skips unused shuttle positions", async () => {
+    const { deps, calls } = await boot();
+    await deps.bus.deliver(buildOrderPlaced({ habitatId: "hab01", podId: "hab01-p001" }));
+    await deps.bus.deliver(buildOrderPlaced({ habitatId: "hab01", podId: "hab01-p002" }));
+    expect(calls.windows).toBe(1);
+    expect(calls.status).toBe(3);
+    expect(calls.position).toBe(0);
+  });
+
+  it("keeps scheduling with canon windows and logs when ephemeris refuses for quota", async () => {
+    const { deps } = await boot();
+    deps.clients.ephemeris.windows = async () => ({ ok: false, error: { code: "QUOTA", message: "quota", retryable: true } });
+    await deps.bus.deliver(buildOrderPlaced());
+    expect(deps.bus.ofTopic("pickup.scheduled")).toHaveLength(1);
+    expect(deps.telemetry.logger.records).toContainEqual(
+      expect.objectContaining({ event: "breaker_state", fields: expect.objectContaining({ to: "open" }) }),
+    );
+  });
+
   it("answers POST /assignments/pickup with the existing assignment and 409 for an order it never saw", async () => {
     const { deps, app } = await boot();
     const placed = buildOrderPlaced();

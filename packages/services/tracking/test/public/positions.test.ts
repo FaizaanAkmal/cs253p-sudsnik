@@ -7,11 +7,7 @@ import { checksumOf } from "../../src/checksum.js";
 import { createApp } from "../../src/index.js";
 import { deps as makeDeps, fakeEphemeris, positionCallback, tenant } from "../helpers.js";
 
-/**
- * What every variant of tracking does: take a relay position callback, refuse a corrupt or foreign one, and
- * answer the fresh read from `ephemeris`. What the cached read is for costs a variant its unit band rather than
- * its correctness, so the hidden acceptance suite holds it and this one passes against every variant.
- */
+/** Position callbacks are deduped and verified; the selected variant also serves the cached read without repeated provider calls. */
 describe("positions", () => {
   let deps: FakeDeps;
   let app: App & { sudsnik: SudsnikApp; outbox: Outbox };
@@ -52,10 +48,26 @@ describe("positions", () => {
     expect(res.statusCode).toBe(400);
   });
 
+  it("serves persisted callback positions without asking ephemeris", async () => {
+    const before = ephemeris.calls;
+    const cached = await app.inject({ url: "/positions/cached/sh1", headers: tenant() });
+    expect(cached.json()).toEqual({ shuttleId: "sh1", orbitPhase: 0.5, observedAt: 1_000, source: "cached" });
+    expect(ephemeris.calls).toBe(before);
+  });
+
   it("serves the fresh read from ephemeris, one call per read", async () => {
     const before = ephemeris.calls;
     const fresh = await app.inject({ url: "/positions/sh1", headers: tenant() });
     expect(fresh.json()).toEqual({ shuttleId: "sh1", orbitPhase: 0.75, observedAt: 9_000, source: "fresh" });
+    expect(ephemeris.calls).toBe(before + 1);
+  });
+
+  it("warms the cache on a miss and reuses it on the next cached read", async () => {
+    const before = ephemeris.calls;
+    const first = await app.inject({ url: "/positions/cached/sh2", headers: tenant() });
+    const second = await app.inject({ url: "/positions/cached/sh2", headers: tenant() });
+    expect(first.json()).toEqual({ shuttleId: "sh2", orbitPhase: 0.75, observedAt: 9_000, source: "cached" });
+    expect(second.json()).toEqual(first.json());
     expect(ephemeris.calls).toBe(before + 1);
   });
 
