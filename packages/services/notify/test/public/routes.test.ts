@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { createApp, variant } from "../../src/index.js";
-import { boot, deliver, event, headers, orderPlaced, type Booted } from "../helpers.js";
+import { boot, deliver, event, headers, orderPlaced, relayAnswers, relayDark, type Booted } from "../helpers.js";
 
 const body = { habitatId: "hab01", orderId: "o1", channel: "habitat-console", template: "order.placed", params: { orderId: "o1", podId: "hab01-p001" } };
 
@@ -43,6 +43,26 @@ describe("routes", () => {
     expect(b.relayCalls).toBe(2);
     expect(b.deps.telemetry.counters()["notify.ingested"]).toBe(2);
     expect(b.deps.telemetry.counters()["notify.unaddressable"]).toBeUndefined();
+  });
+
+  it("deduplicates a repeated bus envelope", async () => {
+    b = await boot(createApp);
+    const order = orderPlaced("o1");
+    await deliver(b, order);
+    await deliver(b, order);
+    expect(b.relayCalls).toBe(1);
+    expect(b.deps.telemetry.counters()["notify.duplicates"]).toBe(1);
+  });
+
+  it("retries relay failures and dead-letters after the attempt budget", async () => {
+    b = await boot(createApp);
+    relayAnswers(b, () => relayDark(0));
+    await deliver(b, orderPlaced("o1"));
+    for (let i = 0; i < 4; i++) await b.app.notify.sweep();
+    expect(b.relayCalls).toBe(5);
+    expect(b.deps.telemetry.counters()["notify.dead_letters"]).toBe(1);
+    await b.app.notify.pump();
+    expect(b.deps.bus.ofTopic("notification.failed")).toHaveLength(1);
   });
 
   it("reports the variant this tree selected on /version", async () => {

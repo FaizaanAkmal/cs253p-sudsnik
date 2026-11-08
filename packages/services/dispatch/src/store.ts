@@ -303,12 +303,15 @@ export function createStore(db: Db) {
     },
     rejectCallback(r: { callbackId: string | undefined; tenantId: string; reason: string; body: unknown }, nowMs: number): void {
       db.write(
-        "insert into rejected_callbacks (callback_id, tenant_id, reason, body, received_at) values (?, ?, ?, ?, ?)",
+        "insert into rejected_callbacks (callback_id, tenant_id, reason, body, received_at) select ?, ?, ?, ?, ? where ? is null or not exists (select 1 from rejected_callbacks where tenant_id = ? and callback_id = ?)",
         r.callbackId ?? null,
         r.tenantId,
         r.reason,
         JSON.stringify(r.body ?? null),
         nowMs,
+        r.callbackId ?? null,
+        r.tenantId,
+        r.callbackId ?? null,
       );
     },
     rejectedCallbacks(): Array<{ callback_id: string | null; tenant_id: string; reason: string; body: string; received_at: number }> {

@@ -1,8 +1,13 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { fileURLToPath } from "node:url";
 import type { PayloadOf } from "@sudsnik/contracts";
+import { serviceDataFile } from "@sudsnik/infra-boot";
+import { openDb } from "@sudsnik/infra-db";
 import { createApp } from "../../src/index.js";
+import { createStore } from "../../src/store.js";
 import { buildCallback, buildDeps, buildOrderCancelled, buildOrderPlaced, buildWashCompleted, relayHeaders, stubClients } from "../support/builders.js";
 
+const migrationsDir = fileURLToPath(new URL("../../migrations/", import.meta.url));
 const apps: Array<{ sudsnik: { drain(): Promise<void> } }> = [];
 afterEach(async () => {
   for (const a of apps.splice(0)) await a.sudsnik.drain();
@@ -73,6 +78,34 @@ describe("relay ingest", () => {
       ["pickup", "done"],
       ["return", "done"],
     ]);
+  });
+
+  it("applies missing earlier steps when a later callback arrives first and ignores repeats", async () => {
+    const { deps, post, orderId, podId } = await placed();
+    const deliveredBody = buildCallback("delivered", { id: "delivered-first", orderId, podId, shuttleId: "sh1", nodeId: "B", atMs: 200 });
+    const delivered = await post(deliveredBody);
+    expect(delivered.statusCode).toBe(200);
+    expect(delivered.json()).toEqual({ accepted: true, duplicate: false });
+
+    expect((await post(deliveredBody)).json()).toEqual({ accepted: true, duplicate: true });
+    expect((await post(buildCallback("collected", { id: "collected-late", orderId, podId, shuttleId: "sh1", atMs: 100 }))).json()).toEqual({
+      accepted: true,
+      duplicate: true,
+    });
+    expect(deps.bus.ofTopic("pod.collected")).toHaveLength(1);
+  });
+
+  it("dead-letters a corrupt callback once even when the relay repeats it", async () => {
+    const { deps, post, orderId, podId } = await placed();
+    const callback = { ...buildCallback("collected", { orderId, podId, shuttleId: "sh1" }), checksum: "ffffffff" };
+    expect((await post(callback)).statusCode).toBe(400);
+    expect((await post(callback)).statusCode).toBe(400);
+    const db = openDb({ path: serviceDataFile(deps), service: "dispatch", meter: deps.meter, migrationsDir });
+    try {
+      expect(createStore(db).rejectedCallbacks()).toHaveLength(1);
+    } finally {
+      db.close();
+    }
   });
 
   it("rejects a malformed body with 400 and an unknown order with 404", async () => {

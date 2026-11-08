@@ -58,8 +58,9 @@ export function createIngest(parts: IngestParts): Ingest {
   const { deps, db, store, outbox, publisher, onArrived } = parts;
   const trust = parts.trust(store);
 
-  function reject(body: RelayCallback, ctx: Ctx, code: "INVALID" | "NOT_FOUND", reason: string, nowMs: number): Result<never> {
+  function reject(body: RelayCallback, ctx: Ctx, code: "INVALID" | "NOT_FOUND" | "CONFLICT", reason: string, nowMs: number): Result<never> {
     store.rejectCallback({ callbackId: body.id, tenantId: ctx.tenantId, reason, body }, nowMs);
+    count("callback_rejected");
     return err(sudsnikError(code, reason));
   }
 
@@ -114,14 +115,14 @@ export function createIngest(parts: IngestParts): Ingest {
       const order = store.order(body.orderId);
       if (!order) return reject(body, ctx, "NOT_FOUND", `order ${body.orderId} is unknown to dispatch`, nowMs);
       const steps = trust.range(body, order.progress);
-      if (!steps.ok) return steps;
+      if (!steps.ok) return reject(body, ctx, "CONFLICT", steps.error.message, nowMs);
       if (steps.value === undefined) return ok({ duplicate: true, arrived: false });
       const { from, to: target } = steps.value;
       const delivers = from <= stepIndex("delivered") && target >= stepIndex("delivered");
       const at = journeyOf(order, body);
       // Refused before any step runs: a transaction that returns an error still commits, so a step applied
       // beside a failure would publish its event and leave `progress` behind to publish it again.
-      if (delivers && at.nodeId === undefined) return err(sudsnikError("CONFLICT", `order ${order.order_id} has no node to be delivered to`));
+      if (delivers && at.nodeId === undefined) return reject(body, ctx, "CONFLICT", `order ${order.order_id} has no node to be delivered to`, nowMs);
       for (let i = from; i <= target; i++) applyStep(order, STEPS[i - 1]!, body, ctx, nowMs, at);
       if (target > order.progress) store.setProgress(order.order_id, target, nowMs);
       return ok({ duplicate: false, arrived: delivers });
@@ -132,12 +133,11 @@ export function createIngest(parts: IngestParts): Ingest {
     async accept(body, ctx) {
       const nowMs = deps.clock.now();
       count("callbacks");
-      if (body.atMs < latestAtMs) count("callback_out_of_order");
-      latestAtMs = Math.max(latestAtMs, body.atMs);
       if (!trust.verify(body)) {
-        count("callback_rejected");
         return reject(body, ctx, "INVALID", "checksum does not verify", nowMs);
       }
+      if (body.atMs < latestAtMs) count("callback_out_of_order");
+      latestAtMs = Math.max(latestAtMs, body.atMs);
       if (body.kind === "position") {
         // Shuttle positions are tracking's callback; one that reaches dispatch is acknowledged and not acted on.
         const duplicate = !trust.fresh({ id: body.id, tenantId: ctx.tenantId, kind: body.kind, orderId: undefined }, nowMs);

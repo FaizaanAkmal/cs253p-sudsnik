@@ -13,6 +13,7 @@ import { goldenTrust } from "./trust.js";
 
 export const variant = "golden";
 export const handlersDir = fileURLToPath(new URL("../../handlers/", import.meta.url));
+const alertsDir = fileURLToPath(new URL("../../alerts/", import.meta.url));
 
 function memoized<T>(cache: Cache<T>, pending: Map<string, Promise<Result<T>>>, key: string, load: () => Promise<Result<T>>): Promise<Result<T>> {
   const active = pending.get(key);
@@ -74,5 +75,5 @@ export function goldenStrategy(deps: ServiceDeps, store: Store): Strategy {
 }
 
 export function createApp(deps: ServiceDeps) {
-  return buildApp(deps, variant, goldenStrategy);
+  return buildApp(deps, variant, goldenStrategy, alertsDir);
 }

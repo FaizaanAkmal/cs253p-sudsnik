@@ -6,7 +6,7 @@ Renders a notification per consumed event and delivers it to the habitat through
 
 Event-driven: `src/handlers/` (one per consumed topic, dispatching to the runtime `src/runtime.ts` bound), `src/templates/` (topic to `{ title, body }` and the channel it goes out on), `src/queue/` (ingest stages and the SQL store), `src/delivery/` (window and relay stages). Stages are `stage(name, fn)` composed with `pipeline` (`src/pipeline.ts`); `src/variants/exactly-once/` composes the ingest and delivery pipelines the service runs, and `src/index.ts` selects it.
 
-Ingest is `parse`, `resolve` (the habitat the event names, else the one the orders table knows, else the one a pod id embeds), `render`, `persist`, and a dispatch stage that hands the new notification straight to delivery. Delivery is `send` and `mark-delivered`: `relay` is called once, and the notification is marked delivered and the attempt recorded whatever `relay` answered. A sweep runs every simulated minute and has nothing to do.
+Ingest is `parse`, `resolve` (the habitat the event names, else the one the orders table knows, else the one a pod id embeds), `render`, `persist`, and a dispatch stage that sends only in a link window. The envelope id is deduplicated in the same transaction as the notification. Delivery records every relay attempt, honors `Retry-After`, and dead-letters permanent failures or notifications after five failed attempts; a one-minute sweep retries due notifications when their habitat is visible.
 
 ## Tables (`notify.sqlite`, `migrations/`)
 
@@ -15,6 +15,6 @@ Ingest is `parse`, `resolve` (the habitat the event names, else the one the orde
 | `notifications` | One row per notification: habitat, template, rendered text, state, attempts, retry hold |
 | `deliveries` | One row per relay attempt and its outcome |
 | `orders` | `orderId` to `habitatId`, filled by the events that name both |
-| `dedupe` | Envelope ids per tenant; ingest takes every envelope as new and writes no row |
-| `dead_letters` | Notifications that spent an attempt budget; nothing spends one |
+| `dedupe` | Envelope ids per tenant, written atomically with the notification |
+| `dead_letters` | Notifications that spent the retry budget or had a permanent relay refusal |
 | `outbox` | `infra/queue`'s table, pumped to the bus |

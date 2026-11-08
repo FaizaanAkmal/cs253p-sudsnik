@@ -74,6 +74,10 @@ export function sweeper(o: SweepOptions): { sweep(): Promise<void>; notePending(
     const now = deps.clock.now();
     let pending = false;
     for (const row of store.undelivered()) {
+      if (row.not_before > now || !inLinkWindow(row.habitat_id, now)) {
+        pending = true;
+        continue;
+      }
       const outcome = await o.deliver({ notification: row, now, attempt: 0 });
       if (stillPending(outcome)) pending = true;
     }
@@ -92,4 +96,3 @@ export function sweeper(o: SweepOptions): { sweep(): Promise<void>; notePending(
 export async function ingestWith(ingest: Pipeline<IngestState>, deps: ServiceDeps, envelope: Envelope): Promise<Result<void>> {
   return toResult(await ingest({ envelope, now: deps.clock.now() }));
 }
-

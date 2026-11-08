@@ -14,8 +14,9 @@ selects).
 The selected `golden` strategy caches link windows for one orbit and node status for one minute, and coalesces
 concurrent misses. It does not fetch shuttle positions that scheduling does not use. A breaker logs `breaker_state`
 when `ephemeris` refuses a call; while it is open, windows come from the canon schedule, node choice rotates locally,
-and a return waits for contact rather than failing. The `naive` variant remains available for comparison. Both variants
-currently share the Week 6 callback trust implementation: the starter takes a relay callback at its word.
+and a return waits for contact rather than failing. The `naive` variant remains available for comparison. The selected
+callback ingest verifies relay checksums, deduplicates callback ids, and applies any missing earlier journey steps
+before the reported step. Callbacks that cannot be processed are recorded in `rejected_callbacks`.
 
 A pod holds a washer only once it has arrived: `order.placed` schedules a window and a node, the `delivered` callback
 acquires the hold and publishes `pod.delivered`. A node with no idle washer is waited on, not polled: the pod is woken by
